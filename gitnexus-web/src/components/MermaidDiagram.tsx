@@ -65,8 +65,14 @@ export const MermaidDiagram = ({ code }: MermaidDiagramProps) => {
         // Generate unique ID for this diagram
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+        // Sanitize subgraph labels: fix "subgraph Name (Label)" → "subgraph Name["Label"]"
+        const sanitized = code.trim().replace(
+          /^(\s*subgraph\s+\S+)\s*\(([^)]+)\)/gm,
+          '$1["$2"]'
+        );
+
         // Render the diagram
-        const { svg: renderedSvg } = await mermaid.render(id, code.trim());
+        const { svg: renderedSvg } = await mermaid.render(id, sanitized);
         setSvg(renderedSvg);
         setError(null);
       } catch (err) {

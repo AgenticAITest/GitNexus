@@ -1,13 +1,16 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Send, Square, Sparkles, User,
-  PanelRightClose, Loader2, AlertTriangle, GitBranch
+  PanelRightClose, Loader2, AlertTriangle, GitBranch,
+  HeartPulse, Zap, TestTube2, Save, ArrowLeft, Trash2, Check,
+  Paperclip, X, Wrench, BookOpen, Code2
 } from 'lucide-react';
 import { useAppState } from '../hooks/useAppState';
 import { ToolCallCard } from './ToolCallCard';
 import { isProviderConfigured } from '../core/llm/settings-service';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ProcessesPanel } from './ProcessesPanel';
+import { getEffectivePrompts, type ReportPrompt } from '../core/llm/report-prompts';
 export const RightPanel = () => {
   const {
     isRightPanelOpen,
@@ -25,11 +28,25 @@ export const RightPanel = () => {
     sendChatMessage,
     stopChatResponse,
     clearChat,
+    // Reports
+    savedReports,
+    saveReport,
+    activeReport,
+    setActiveReport,
+    // Settings (to refresh prompts on close)
+    isSettingsPanelOpen,
   } = useAppState();
 
   const [chatInput, setChatInput] = useState('');
   const [activeTab, setActiveTab] = useState<'chat' | 'processes'>('chat');
+  const [pendingReport, setPendingReport] = useState<ReportPrompt | null>(null);
+  const [attachedFile, setAttachedFile] = useState<{ name: string; content: string } | null>(null);
+  const [fileUploadStatus, setFileUploadStatus] = useState<'idle' | 'reading' | 'error'>('idle');
+  // Re-read prompts from localStorage when settings panel closes (user may have edited them)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const reportPrompts = useMemo(() => getEffectivePrompts(), [isSettingsPanelOpen]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when messages update or while streaming
@@ -178,23 +195,100 @@ export const RightPanel = () => {
     adjustTextareaHeight();
   }, [chatInput, adjustTextareaHeight]);
 
+  // File upload handler
+  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setFileUploadStatus('reading');
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const content = reader.result as string;
+      setAttachedFile({ name: file.name, content });
+      setFileUploadStatus('idle');
+    };
+    reader.onerror = () => {
+      setFileUploadStatus('error');
+      setTimeout(() => setFileUploadStatus('idle'), 3000);
+    };
+    reader.readAsText(file);
+
+    // Reset input so the same file can be re-selected
+    e.target.value = '';
+  }, []);
+
   // Chat handlers
   const handleSendMessage = async () => {
-    if (!chatInput.trim()) return;
-    const text = chatInput.trim();
+    if (!chatInput.trim() && !attachedFile) return;
+
+    let text = chatInput.trim();
+    const reportMeta = pendingReport ? { type: pendingReport.type, title: pendingReport.title } as const : undefined;
+
+    // Build the full message
+    let fullMessage: string;
+    if (pendingReport) {
+      // Combine user input + attached file content
+      let userInput = text;
+      if (attachedFile) {
+        userInput = `${userInput ? userInput + '\n\n' : ''}--- Attached: ${attachedFile.name} ---\n${attachedFile.content}`;
+      }
+      // Replace placeholder in the report prompt template
+      fullMessage = pendingReport.prompt.replace('{{USER_INPUT}}', userInput);
+    } else if (attachedFile) {
+      // Regular chat with file attachment
+      fullMessage = `${text ? text + '\n\n' : ''}--- Attached: ${attachedFile.name} ---\n${attachedFile.content}`;
+    } else {
+      fullMessage = text;
+    }
+
     setChatInput('');
+    setPendingReport(null);
+    setAttachedFile(null);
+
     // Reset textarea height after sending
     if (textareaRef.current) {
       textareaRef.current.style.height = '36px';
       textareaRef.current.style.overflowY = 'hidden';
     }
-    await sendChatMessage(text);
+    await sendChatMessage(fullMessage, reportMeta);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
+    }
+  };
+
+  const handleReportPrompt = useCallback((rp: ReportPrompt) => {
+    if (rp.requiresInput) {
+      // Set pending report and focus textarea
+      setPendingReport(rp);
+      setChatInput('');
+      setAttachedFile(null);
+      setTimeout(() => textareaRef.current?.focus(), 50);
+    } else {
+      // Fire immediately (e.g., Health Report)
+      sendChatMessage(rp.prompt, { type: rp.type, title: rp.title });
+    }
+  }, [sendChatMessage]);
+
+  const cancelPendingReport = useCallback(() => {
+    setPendingReport(null);
+    setChatInput('');
+    setAttachedFile(null);
+  }, []);
+
+  const getReportIcon = (type: string) => {
+    switch (type) {
+      case 'health': return HeartPulse;
+      case 'impact': return Zap;
+      case 'test-scenarios': return TestTube2;
+      case 'refactoring': return Wrench;
+      case 'fsd': return BookOpen;
+      case 'tsd': return Code2;
+      default: return Sparkles;
     }
   };
 
@@ -257,8 +351,32 @@ export const RightPanel = () => {
         </div>
       )}
 
-      {/* Chat Content - only show when chat tab is active */}
-      {activeTab === 'chat' && (
+      {/* Report Viewer - show when activeReport is set */}
+      {activeTab === 'chat' && activeReport && (
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 bg-elevated/50 border-b border-border-subtle">
+            <button
+              onClick={() => setActiveReport(null)}
+              className="p-1 text-text-muted hover:text-text-primary hover:bg-hover rounded transition-colors"
+              title="Back to Chat"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-medium text-text-primary truncate">{activeReport.title}</h3>
+              <p className="text-[10px] text-text-muted">
+                {new Date(activeReport.createdAt).toLocaleString()}
+              </p>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 scrollbar-thin chat-prose">
+            <MarkdownRenderer content={activeReport.content} onLinkClick={handleLinkClick} showCopyButton={true} />
+          </div>
+        </div>
+      )}
+
+      {/* Chat Content - only show when chat tab is active and no report viewer */}
+      {activeTab === 'chat' && !activeReport && (
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Status bar */}
           <div className="flex items-center gap-2.5 px-4 py-3 bg-elevated/50 border-b border-border-subtle">
@@ -310,6 +428,26 @@ export const RightPanel = () => {
                     </button>
                   ))}
                 </div>
+                {/* Report Generation */}
+                <div className="mt-4 pt-4 border-t border-border-subtle w-full">
+                  <p className="text-xs text-text-muted mb-3">Generate Reports</p>
+                  <div className="flex flex-col gap-2 w-full">
+                    {reportPrompts.map((rp) => {
+                      const Icon = getReportIcon(rp.type);
+                      return (
+                        <button
+                          key={rp.type}
+                          onClick={() => handleReportPrompt(rp)}
+                          disabled={!isAgentReady && !isAgentInitializing}
+                          className="flex items-center gap-2 px-3 py-2 bg-elevated border border-border-subtle rounded-lg text-xs text-text-secondary hover:border-accent hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Icon className="w-3.5 h-3.5" />
+                          {rp.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="flex flex-col gap-6">
@@ -326,7 +464,28 @@ export const RightPanel = () => {
                           <span className="text-xs font-medium text-text-muted uppercase tracking-wide">You</span>
                         </div>
                         <div className="pl-6 text-sm text-text-primary">
-                          {message.content}
+                          {message.reportMeta ? (
+                            <div>
+                              <span className="flex items-center gap-1.5">
+                                {(() => { const Icon = getReportIcon(message.reportMeta.type); return <Icon className="w-3.5 h-3.5 text-accent" />; })()}
+                                {message.reportMeta.title}
+                              </span>
+                              {/* Show user's input excerpt for reports that required input */}
+                              {(() => {
+                                const match = message.content.match(/--- USER'S PLANNED CHANGES ---\n([\s\S]*?)\n--- END ---/);
+                                const match2 = message.content.match(/--- REQUIREMENTS \/ SPECIFICATION ---\n([\s\S]*?)\n--- END ---/);
+                                const userInput = (match?.[1] || match2?.[1] || '').trim();
+                                // Strip attached file content for display
+                                const displayInput = userInput.split(/\n--- Attached: /)[0].trim();
+                                if (!displayInput) return null;
+                                return (
+                                  <p className="mt-1 text-xs text-text-secondary line-clamp-3">{displayInput}</p>
+                                );
+                              })()}
+                            </div>
+                          ) : (
+                            message.content
+                          )}
                         </div>
                       </div>
                     )}
@@ -380,6 +539,25 @@ export const RightPanel = () => {
                             />
                           )}
                         </div>
+                        {/* Save to Reports button */}
+                        {message.reportMeta && !isChatLoading && message.content && (
+                          <div className="pl-6 mt-3">
+                            {savedReports.some(r => r.messageId === message.id) ? (
+                              <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400">
+                                <Check className="w-3.5 h-3.5" />
+                                Saved to Reports
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => saveReport(message.id, message.reportMeta!.type, message.reportMeta!.title)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent/15 text-accent border border-accent/30 rounded-lg hover:bg-accent/25 transition-colors"
+                              >
+                                <Save className="w-3.5 h-3.5" />
+                                Save to Reports
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -394,17 +572,80 @@ export const RightPanel = () => {
 
           {/* Input */}
           <div className="p-3 bg-surface border-t border-border-subtle">
+            {/* Pending report hint */}
+            {pendingReport && (
+              <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-accent/10 border border-accent/20 rounded-lg">
+                {(() => { const Icon = getReportIcon(pendingReport.type); return <Icon className="w-3.5 h-3.5 text-accent shrink-0" />; })()}
+                <span className="text-xs text-accent flex-1">{pendingReport.inputHint}</span>
+                <button
+                  onClick={cancelPendingReport}
+                  className="p-0.5 text-text-muted hover:text-text-primary transition-colors"
+                  title="Cancel"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* File upload status */}
+            {fileUploadStatus === 'reading' && (
+              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-elevated border border-border-subtle rounded-lg">
+                <Loader2 className="w-3 h-3 text-accent shrink-0 animate-spin" />
+                <span className="text-xs text-text-muted">Reading file...</span>
+              </div>
+            )}
+            {fileUploadStatus === 'error' && (
+              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-rose-500/10 border border-rose-500/30 rounded-lg">
+                <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                <span className="text-xs text-rose-300">Failed to read file. Try a .txt or .md file.</span>
+              </div>
+            )}
+
+            {/* Attached file chip */}
+            {attachedFile && (
+              <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
+                <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                <span className="text-xs text-text-primary truncate flex-1">{attachedFile.name}</span>
+                <span className="text-[10px] text-text-muted shrink-0">
+                  {(attachedFile.content.length / 1024).toFixed(1)} KB
+                </span>
+                <button
+                  onClick={() => setAttachedFile(null)}
+                  className="p-0.5 text-text-muted hover:text-text-primary transition-colors"
+                  title="Remove file"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {/* Hidden file input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".md,.txt,.csv,.json,.yaml,.yml,.xml,.html,.rst,.adoc"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+
             <div className="flex items-end gap-2 px-3 py-2 bg-elevated border border-border-subtle rounded-xl transition-all focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
               <textarea
                 ref={textareaRef}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask about the codebase..."
+                placeholder={pendingReport?.inputPlaceholder ?? 'Ask about the codebase...'}
                 rows={1}
                 className="flex-1 bg-transparent border-none outline-none text-sm text-text-primary placeholder:text-text-muted resize-none min-h-[36px] scrollbar-thin"
                 style={{ height: '36px', overflowY: 'hidden' }}
               />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="p-1.5 text-text-muted hover:text-text-primary transition-colors"
+                title="Attach file"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
               <button
                 onClick={clearChat}
                 className="px-2 py-1 text-xs text-text-muted hover:text-text-primary transition-colors"
@@ -423,7 +664,7 @@ export const RightPanel = () => {
               ) : (
                 <button
                   onClick={handleSendMessage}
-                  disabled={!chatInput.trim() || isAgentInitializing}
+                  disabled={(!chatInput.trim() && !attachedFile) || isAgentInitializing}
                   className="w-9 h-9 flex items-center justify-center bg-accent rounded-md text-white transition-all hover:bg-accent-dim disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Send className="w-3.5 h-3.5" />

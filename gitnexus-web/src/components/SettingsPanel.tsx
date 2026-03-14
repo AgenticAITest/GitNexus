@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { X, Key, Server, Brain, Check, AlertCircle, Eye, EyeOff, RefreshCw, ChevronDown, Loader2, Search } from 'lucide-react';
+import { X, Key, Server, Brain, Check, AlertCircle, Eye, EyeOff, RefreshCw, ChevronDown, Loader2, Search, FileText, RotateCcw } from 'lucide-react';
 import {
   loadSettings,
   saveSettings,
   getProviderDisplayName,
   fetchOpenRouterModels,
 } from '../core/llm/settings-service';
-import type { LLMSettings, LLMProvider } from '../core/llm/types';
+import type { LLMSettings, LLMProvider, ReportType } from '../core/llm/types';
+import { REPORT_PROMPTS, loadCustomPrompts, saveCustomPrompts } from '../core/llm/report-prompts';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -213,6 +214,7 @@ const checkOllamaStatus = async (baseUrl: string): Promise<{ ok: boolean; error:
 };
 
 export const SettingsPanel = ({ isOpen, onClose, onSettingsSaved, backendUrl, isBackendConnected, onBackendUrlChange }: SettingsPanelProps) => {
+  const [settingsTab, setSettingsTab] = useState<'provider' | 'prompts'>('provider');
   const [settings, setSettings] = useState<LLMSettings>(loadSettings);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle');
@@ -222,11 +224,15 @@ export const SettingsPanel = ({ isOpen, onClose, onSettingsSaved, backendUrl, is
   // OpenRouter models state
   const [openRouterModels, setOpenRouterModels] = useState<Array<{ id: string; name: string }>>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
+  // Report prompt editing state
+  const [customPrompts, setCustomPrompts] = useState<Partial<Record<ReportType, string>>>({});
+  const [expandedPrompt, setExpandedPrompt] = useState<ReportType | null>(null);
 
   // Load settings when panel opens
   useEffect(() => {
     if (isOpen) {
       setSettings(loadSettings());
+      setCustomPrompts(loadCustomPrompts());
       setSaveStatus('idle');
       setOllamaError(null);
     }
@@ -267,12 +273,33 @@ export const SettingsPanel = ({ isOpen, onClose, onSettingsSaved, backendUrl, is
   const handleSave = () => {
     try {
       saveSettings(settings);
+      saveCustomPrompts(customPrompts);
       setSaveStatus('saved');
       onSettingsSaved?.();
       setTimeout(() => setSaveStatus('idle'), 2000);
     } catch {
       setSaveStatus('error');
     }
+  };
+
+  const getPromptValue = (type: ReportType): string => {
+    if (customPrompts[type] !== undefined) return customPrompts[type]!;
+    return REPORT_PROMPTS.find(rp => rp.type === type)?.prompt ?? '';
+  };
+
+  const isPromptCustomized = (type: ReportType): boolean => {
+    const custom = customPrompts[type];
+    if (custom === undefined) return false;
+    const defaultPrompt = REPORT_PROMPTS.find(rp => rp.type === type)?.prompt;
+    return custom !== defaultPrompt;
+  };
+
+  const resetPrompt = (type: ReportType) => {
+    setCustomPrompts(prev => {
+      const next = { ...prev };
+      delete next[type];
+      return next;
+    });
   };
 
   const toggleApiKeyVisibility = (key: string) => {
@@ -301,8 +328,21 @@ export const SettingsPanel = ({ isOpen, onClose, onSettingsSaved, backendUrl, is
               <Brain className="w-5 h-5 text-accent" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-text-primary">AI Settings</h2>
-              <p className="text-xs text-text-muted">Configure your LLM provider</p>
+              <h2 className="text-lg font-semibold text-text-primary">Settings</h2>
+              <div className="flex items-center gap-1 mt-1">
+                <button
+                  onClick={() => setSettingsTab('provider')}
+                  className={`px-2 py-0.5 text-xs rounded transition-colors ${settingsTab === 'provider' ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-primary'}`}
+                >
+                  LLM Provider
+                </button>
+                <button
+                  onClick={() => setSettingsTab('prompts')}
+                  className={`px-2 py-0.5 text-xs rounded transition-colors ${settingsTab === 'prompts' ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-primary'}`}
+                >
+                  Report Prompts
+                </button>
+              </div>
             </div>
           </div>
           <button
@@ -315,6 +355,69 @@ export const SettingsPanel = ({ isOpen, onClose, onSettingsSaved, backendUrl, is
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+
+          {/* Report Prompts Tab */}
+          {settingsTab === 'prompts' && (
+            <div className="space-y-4">
+              <div className="p-3 bg-accent/10 border border-accent/20 rounded-xl">
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  Customize the prompts sent to the LLM when generating reports. Use <code className="px-1 py-0.5 bg-elevated rounded text-accent">{'{{USER_INPUT}}'}</code> as a placeholder for user-provided input (Impact Analysis and Test Scenarios).
+                </p>
+              </div>
+
+              {REPORT_PROMPTS.map((rp) => {
+                const isExpanded = expandedPrompt === rp.type;
+                const isCustom = isPromptCustomized(rp.type);
+                return (
+                  <div key={rp.type} className="border border-border-subtle rounded-xl overflow-hidden">
+                    <button
+                      onClick={() => setExpandedPrompt(isExpanded ? null : rp.type)}
+                      className="w-full flex items-center gap-3 px-4 py-3 bg-elevated/50 hover:bg-hover transition-colors text-left"
+                    >
+                      <FileText className="w-4 h-4 text-text-muted shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm font-medium text-text-primary">{rp.label}</span>
+                        {isCustom && (
+                          <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-amber-500/20 text-amber-300 rounded-full">
+                            customized
+                          </span>
+                        )}
+                      </div>
+                      <ChevronDown className={`w-4 h-4 text-text-muted transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {isExpanded && (
+                      <div className="p-4 space-y-3 border-t border-border-subtle animate-fade-in">
+                        <textarea
+                          value={getPromptValue(rp.type)}
+                          onChange={(e) => setCustomPrompts(prev => ({ ...prev, [rp.type]: e.target.value }))}
+                          rows={12}
+                          className="w-full px-3 py-2 bg-elevated border border-border-subtle rounded-lg text-text-primary text-xs font-mono leading-relaxed resize-y focus:border-accent focus:ring-2 focus:ring-accent/20 outline-none transition-all scrollbar-thin"
+                        />
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10px] text-text-muted">
+                            {rp.requiresInput ? 'Uses {{USER_INPUT}} placeholder' : 'Sent directly to LLM (no user input)'}
+                          </p>
+                          {isCustom && (
+                            <button
+                              onClick={() => resetPrompt(rp.type)}
+                              className="flex items-center gap-1.5 px-2 py-1 text-xs text-amber-300 hover:text-amber-200 hover:bg-amber-500/10 rounded transition-colors"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Reset to default
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Provider Tab */}
+          {settingsTab === 'provider' && <>
           {/* Local Server */}
           {backendUrl !== undefined && onBackendUrlChange && (
             <div className="space-y-3">
@@ -828,6 +931,7 @@ export const SettingsPanel = ({ isOpen, onClose, onSettingsSaved, backendUrl, is
               </div>
             </div>
           </div>
+          </>}
         </div>
 
         {/* Footer */}

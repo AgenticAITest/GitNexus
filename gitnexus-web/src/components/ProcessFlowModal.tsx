@@ -144,7 +144,12 @@ export const ProcessFlowModal = ({ process, onClose, onFocusInGraph, isFullScree
                 // Clear previous content
                 diagramRef.current!.innerHTML = '';
 
-                const { svg } = await mermaid.render(id, mermaidCode);
+                // Sanitize subgraph labels: fix "subgraph Name (Label)" → "subgraph Name["Label"]"
+                const sanitizedCode = mermaidCode.replace(
+                    /^(\s*subgraph\s+\S+)\s*\(([^)]+)\)/gm,
+                    '$1["$2"]'
+                );
+                const { svg } = await mermaid.render(id, sanitizedCode);
                 diagramRef.current!.innerHTML = svg;
             } catch (error) {
                 console.error('Mermaid render error:', error);

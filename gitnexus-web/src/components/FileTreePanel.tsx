@@ -14,10 +14,20 @@ import {
   Variable,
   Hash,
   Target,
+  FileText,
+  HeartPulse,
+  Zap,
+  TestTube2,
+  Trash2,
+  Download,
+  Wrench,
+  BookOpen,
+  Code2,
 } from 'lucide-react';
 import { useAppState } from '../hooks/useAppState';
 import { FILTERABLE_LABELS, NODE_COLORS, ALL_EDGE_TYPES, EDGE_INFO, type EdgeType } from '../lib/constants';
 import { GraphNode, NodeLabel } from '../core/graph/types';
+import type { ReportType } from '../core/llm/types';
 
 // Tree node structure
 interface TreeNode {
@@ -195,12 +205,12 @@ interface FileTreePanelProps {
 }
 
 export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
-  const { graph, visibleLabels, toggleLabelVisibility, visibleEdgeTypes, toggleEdgeVisibility, selectedNode, setSelectedNode, openCodePanel, depthFilter, setDepthFilter } = useAppState();
+  const { graph, visibleLabels, toggleLabelVisibility, visibleEdgeTypes, toggleEdgeVisibility, selectedNode, setSelectedNode, openCodePanel, depthFilter, setDepthFilter, savedReports, deleteReport, setActiveReport, setRightPanelOpen } = useAppState();
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-  const [activeTab, setActiveTab] = useState<'files' | 'filters'>('files');
+  const [activeTab, setActiveTab] = useState<'files' | 'filters' | 'reports'>('files');
 
   // Build file tree from graph
   const fileTree = useMemo(() => {
@@ -292,6 +302,13 @@ export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
         >
           <Filter className="w-5 h-5" />
         </button>
+        <button
+          onClick={() => { setIsCollapsed(false); setActiveTab('reports'); }}
+          className={`p-2 rounded transition-colors ${activeTab === 'reports' ? 'text-accent bg-accent/10' : 'text-text-secondary hover:text-text-primary hover:bg-hover'}`}
+          title="Reports"
+        >
+          <FileText className="w-5 h-5" />
+        </button>
       </div>
     );
   }
@@ -318,6 +335,15 @@ export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
               }`}
           >
             Filters
+          </button>
+          <button
+            onClick={() => setActiveTab('reports')}
+            className={`px-2 py-1 text-xs rounded transition-colors ${activeTab === 'reports'
+              ? 'bg-accent/20 text-accent'
+              : 'text-text-secondary hover:text-text-primary hover:bg-hover'
+              }`}
+          >
+            Reports
           </button>
         </div>
         <button
@@ -510,6 +536,77 @@ export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'reports' && (
+        <div className="flex-1 overflow-y-auto scrollbar-thin p-3">
+          {savedReports.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-center px-4">
+              <FileText className="w-10 h-10 text-text-muted mb-3 opacity-40" />
+              <p className="text-xs text-text-muted">No reports yet.</p>
+              <p className="text-[10px] text-text-muted mt-1">Use the chat to generate reports.</p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-4">
+              {([
+                { type: 'health' as ReportType, label: 'Health Assessment', Icon: HeartPulse },
+                { type: 'impact' as ReportType, label: 'Impact Analysis', Icon: Zap },
+                { type: 'test-scenarios' as ReportType, label: 'Test Scenarios', Icon: TestTube2 },
+                { type: 'refactoring' as ReportType, label: 'Refactoring Suggestions', Icon: Wrench },
+                { type: 'fsd' as ReportType, label: 'Functional Specification', Icon: BookOpen },
+                { type: 'tsd' as ReportType, label: 'Technical Specification', Icon: Code2 },
+              ]).map(({ type, label, Icon }) => {
+                const reports = savedReports.filter(r => r.type === type);
+                if (!reports.length) return null;
+                return (
+                  <div key={type}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Icon className="w-3.5 h-3.5 text-text-muted" />
+                      <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wide">{label}</h3>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      {reports.map(report => (
+                        <div
+                          key={report.id}
+                          className="group flex items-center gap-2 px-2 py-1.5 rounded text-left transition-colors hover:bg-hover cursor-pointer"
+                          onClick={() => { setActiveReport(report); setRightPanelOpen(true); }}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs text-text-primary truncate">{report.title}</p>
+                            <p className="text-[10px] text-text-muted">{new Date(report.createdAt).toLocaleDateString()}</p>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const blob = new Blob([report.content], { type: 'text/markdown' });
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `${report.title.replace(/[^a-zA-Z0-9-_ ]/g, '')}-${new Date(report.createdAt).toISOString().slice(0, 10)}.md`;
+                              a.click();
+                              URL.revokeObjectURL(url);
+                            }}
+                            className="p-1 text-text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-all"
+                            title="Download as Markdown"
+                          >
+                            <Download className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); deleteReport(report.id); }}
+                            className="p-1 text-text-muted hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-all"
+                            title="Delete report"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

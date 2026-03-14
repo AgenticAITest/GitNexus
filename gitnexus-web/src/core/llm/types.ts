@@ -176,6 +176,18 @@ export interface ChatMessage {
   steps?: MessageStep[];
   toolCallId?: string;
   timestamp: number;
+  reportMeta?: { type: ReportType; title: string };
+}
+
+export type ReportType = 'health' | 'impact' | 'test-scenarios' | 'refactoring' | 'fsd' | 'tsd';
+
+export interface SavedReport {
+  id: string;
+  type: ReportType;
+  title: string;
+  content: string;
+  messageId: string;
+  createdAt: number;
 }
 
 /**

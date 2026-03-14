@@ -1,8 +1,9 @@
 import { useState, useCallback, useRef, DragEvent } from 'react';
-import { Upload, FileArchive, Github, Loader2, ArrowRight, Key, Eye, EyeOff, Globe, X } from 'lucide-react';
+import { Upload, FileArchive, Github, Loader2, ArrowRight, Key, Eye, EyeOff, Globe, X, Database, ArrowLeft, FolderOpen } from 'lucide-react';
 import { cloneRepository, parseGitHubUrl } from '../services/git-clone';
-import { connectToServer, type ConnectToServerResult } from '../services/server-connection';
+import { connectToServer, fetchRepos, normalizeServerUrl, type ConnectToServerResult, type RepoSummary } from '../services/server-connection';
 import { FileEntry } from '../services/zip';
+import { shouldIgnorePath } from '../config/ignore-service';
 
 interface DropZoneProps {
   onFileSelect: (file: File) => void;
@@ -16,21 +17,36 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Check if File System Access API is available
+const hasDirectoryPicker = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+
 export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZoneProps) => {
   const [isDragging, setIsDragging] = useState(false);
-  const [activeTab, setActiveTab] = useState<'zip' | 'github' | 'server'>('zip');
+  const [activeTab, setActiveTab] = useState<'zip' | 'github' | 'local' | 'server'>('zip');
   const [githubUrl, setGithubUrl] = useState('');
-  const [githubToken, setGithubToken] = useState('');
+  const [githubToken, setGithubToken] = useState(() =>
+    localStorage.getItem('gitnexus-github-pat') || ''
+  );
   const [showToken, setShowToken] = useState(false);
+  const [rememberPat, setRememberPat] = useState(() =>
+    !!localStorage.getItem('gitnexus-github-pat')
+  );
   const [isCloning, setIsCloning] = useState(false);
   const [cloneProgress, setCloneProgress] = useState({ phase: '', percent: 0 });
   const [error, setError] = useState<string | null>(null);
+
+  // Local folder state
+  const [isReadingFolder, setIsReadingFolder] = useState(false);
+  const [folderProgress, setFolderProgress] = useState({ read: 0, total: 0 });
 
   // Server tab state
   const [serverUrl, setServerUrl] = useState(() =>
     localStorage.getItem('gitnexus-server-url') || ''
   );
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isFetchingRepos, setIsFetchingRepos] = useState(false);
+  const [serverRepos, setServerRepos] = useState<RepoSummary[] | null>(null);
+  const [connectedServerUrl, setConnectedServerUrl] = useState<string | null>(null);
   const [serverProgress, setServerProgress] = useState<{
     phase: string;
     downloaded: number;
@@ -101,7 +117,13 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
         githubToken || undefined
       );
 
-      setGithubToken('');
+      // Persist or clear PAT based on user preference
+      if (rememberPat && githubToken) {
+        localStorage.setItem('gitnexus-github-pat', githubToken);
+      } else {
+        localStorage.removeItem('gitnexus-github-pat');
+        setGithubToken('');
+      }
 
       if (onGitClone) {
         onGitClone(files);
@@ -136,6 +158,40 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
     localStorage.setItem('gitnexus-server-url', serverUrl);
 
     setError(null);
+    setIsFetchingRepos(true);
+
+    try {
+      const baseUrl = normalizeServerUrl(urlToUse);
+      const repos = await fetchRepos(baseUrl);
+      setConnectedServerUrl(urlToUse);
+
+      if (repos.length === 1) {
+        // Single repo — load it directly
+        handleSelectRepo(repos[0].name, urlToUse);
+      } else if (repos.length === 0) {
+        setError('Server has no indexed repositories. Run `gitnexus analyze` in a repo first.');
+        setIsFetchingRepos(false);
+      } else {
+        // Multiple repos — show picker
+        setServerRepos(repos);
+        setIsFetchingRepos(false);
+      }
+    } catch (err) {
+      console.error('Server connect failed:', err);
+      const message = err instanceof Error ? err.message : 'Failed to connect to server';
+      if (message.includes('Failed to fetch') || message.includes('NetworkError')) {
+        setError('Cannot reach server. Check the URL and ensure the server is running.');
+      } else {
+        setError(message);
+      }
+      setIsFetchingRepos(false);
+    }
+  };
+
+  const handleSelectRepo = async (repoName: string, serverUrlOverride?: string) => {
+    const urlToUse = serverUrlOverride || connectedServerUrl || serverUrl.trim() || window.location.origin;
+
+    setError(null);
     setIsConnecting(true);
     setServerProgress({ phase: 'validating', downloaded: 0, total: null });
 
@@ -148,7 +204,8 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
         (phase, downloaded, total) => {
           setServerProgress({ phase, downloaded, total });
         },
-        abortController.signal
+        abortController.signal,
+        repoName
       );
 
       if (onServerConnect) {
@@ -156,25 +213,92 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        // User cancelled
         return;
       }
-      console.error('Server connect failed:', err);
-      const message = err instanceof Error ? err.message : 'Failed to connect to server';
-      if (message.includes('Failed to fetch') || message.includes('NetworkError')) {
-        setError('Cannot reach server. Check the URL and ensure the server is running.');
-      } else {
-        setError(message);
-      }
+      console.error('Repo load failed:', err);
+      const message = err instanceof Error ? err.message : 'Failed to load repository';
+      setError(message);
     } finally {
       setIsConnecting(false);
       abortControllerRef.current = null;
     }
   };
 
+  const handleBackToRepoList = () => {
+    setIsConnecting(false);
+    setServerProgress({ phase: '', downloaded: 0, total: null });
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+  };
+
   const handleCancelConnect = () => {
     abortControllerRef.current?.abort();
     setIsConnecting(false);
+  };
+
+  // Local folder picker
+  const handleLocalFolder = async () => {
+    if (!hasDirectoryPicker) {
+      setError('Your browser does not support the folder picker. Use Chrome or Edge.');
+      return;
+    }
+
+    setError(null);
+    setIsReadingFolder(true);
+    setFolderProgress({ read: 0, total: 0 });
+
+    try {
+      const dirHandle = await (window as any).showDirectoryPicker({ mode: 'read' });
+      const files: FileEntry[] = [];
+
+      // Recursively read all files
+      const readDir = async (handle: FileSystemDirectoryHandle, basePath: string) => {
+        for await (const entry of (handle as any).values()) {
+          const entryPath = basePath ? `${basePath}/${entry.name}` : entry.name;
+
+          if (entry.kind === 'directory') {
+            // Skip ignored directories early
+            if (shouldIgnorePath(entryPath + '/')) continue;
+            await readDir(entry as FileSystemDirectoryHandle, entryPath);
+          } else {
+            if (shouldIgnorePath(entryPath)) continue;
+            try {
+              const file = await (entry as FileSystemFileHandle).getFile();
+              // Skip binary/large files
+              if (file.size > 1024 * 1024) continue; // 1MB limit per file
+              const content = await file.text();
+              files.push({ path: `${dirHandle.name}/${entryPath}`, content });
+              setFolderProgress(prev => ({ ...prev, read: files.length }));
+            } catch {
+              // Skip unreadable files
+            }
+          }
+        }
+      };
+
+      await readDir(dirHandle, '');
+
+      if (files.length === 0) {
+        setError('No readable source files found in the selected folder.');
+        setIsReadingFolder(false);
+        return;
+      }
+
+      setIsReadingFolder(false);
+
+      if (onGitClone) {
+        onGitClone(files);
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') {
+        // User cancelled the picker
+        setIsReadingFolder(false);
+        return;
+      }
+      console.error('Folder read failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to read folder');
+      setIsReadingFolder(false);
+    }
   };
 
   const serverProgressPercent = serverProgress.total
@@ -218,8 +342,24 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
             `}
           >
             <Github className="w-4 h-4" />
-            GitHub URL
+            GitHub
           </button>
+          {hasDirectoryPicker && (
+            <button
+              onClick={() => { setActiveTab('local'); setError(null); }}
+              className={`
+                flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg
+                text-sm font-medium transition-all duration-200
+                ${activeTab === 'local'
+                  ? 'bg-accent text-white shadow-md'
+                  : 'text-text-secondary hover:text-text-primary hover:bg-elevated'
+                }
+              `}
+            >
+              <FolderOpen className="w-4 h-4" />
+              Local
+            </button>
+          )}
           <button
             onClick={() => { setActiveTab('server'); setError(null); }}
             className={`
@@ -421,11 +561,22 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
               </div>
             )}
 
-            {/* Security note */}
+            {/* Remember PAT checkbox */}
             {githubToken && (
-              <p className="mt-3 text-xs text-text-muted text-center">
-                Token stays in your browser only, never sent to any server
-              </p>
+              <label className="mt-3 flex items-center gap-2 cursor-pointer justify-center">
+                <input
+                  type="checkbox"
+                  checked={rememberPat}
+                  onChange={(e) => {
+                    setRememberPat(e.target.checked);
+                    if (!e.target.checked) {
+                      localStorage.removeItem('gitnexus-github-pat');
+                    }
+                  }}
+                  className="w-3.5 h-3.5 rounded border-border-subtle accent-accent"
+                />
+                <span className="text-xs text-text-muted">Remember token (stored in browser)</span>
+              </label>
             )}
 
             {/* Hints */}
@@ -440,61 +591,196 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
           </div>
         )}
 
-        {/* Server Tab */}
-        {activeTab === 'server' && (
+        {/* Local Folder Tab */}
+        {activeTab === 'local' && (
           <div className="p-8 bg-surface border border-border-default rounded-3xl">
             {/* Icon */}
-            <div className="mx-auto w-20 h-20 mb-6 flex items-center justify-center bg-gradient-to-br from-accent to-emerald-600 rounded-2xl shadow-lg">
-              <Globe className="w-10 h-10 text-white" />
+            <div className="mx-auto w-20 h-20 mb-6 flex items-center justify-center bg-gradient-to-br from-amber-500 to-orange-600 rounded-2xl shadow-lg">
+              <FolderOpen className="w-10 h-10 text-white" />
             </div>
 
             {/* Text */}
             <h2 className="text-xl font-semibold text-text-primary text-center mb-2">
-              Connect to Server
+              {isReadingFolder ? 'Reading Files' : 'Open Local Folder'}
             </h2>
             <p className="text-sm text-text-secondary text-center mb-6">
-              Load a pre-built knowledge graph from a running GitNexus server
+              {isReadingFolder
+                ? `Reading source files... ${folderProgress.read} files found`
+                : 'Select a project folder from your computer'
+              }
             </p>
 
-            {/* Inputs */}
-            <div className="space-y-3" data-form-type="other">
-              <input
-                type="url"
-                name="server-url-input"
-                value={serverUrl}
-                onChange={(e) => setServerUrl(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !isConnecting && handleServerConnect()}
-                placeholder={window.location.origin}
-                disabled={isConnecting}
-                autoComplete="off"
-                data-lpignore="true"
-                data-1p-ignore="true"
-                data-form-type="other"
-                className="
-                  w-full px-4 py-3
-                  bg-elevated border border-border-default rounded-xl
-                  text-text-primary placeholder-text-muted
-                  focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent
-                  disabled:opacity-50 disabled:cursor-not-allowed
-                  transition-all duration-200
-                "
-              />
-
-              <div className="flex gap-2">
+            {isReadingFolder ? (
+              <div className="flex flex-col items-center gap-4">
+                <Loader2 className="w-8 h-8 animate-spin text-accent" />
+                <p className="text-xs text-text-muted">{folderProgress.read} files read so far...</p>
+              </div>
+            ) : (
+              <>
                 <button
-                  onClick={handleServerConnect}
-                  disabled={isConnecting}
+                  onClick={handleLocalFolder}
                   className="
-                    flex-1 flex items-center justify-center gap-2
+                    w-full flex items-center justify-center gap-2
                     px-4 py-3
                     bg-accent hover:bg-accent/90
                     text-white font-medium rounded-xl
-                    disabled:opacity-50 disabled:cursor-not-allowed
                     transition-all duration-200
                   "
                 >
-                  {isConnecting ? (
-                    <>
+                  <FolderOpen className="w-5 h-5" />
+                  Choose Folder
+                </button>
+
+                {/* Hints */}
+                <div className="mt-4 flex items-center justify-center gap-3 text-xs text-text-muted">
+                  <span className="px-3 py-1.5 bg-elevated border border-border-subtle rounded-md">
+                    No upload needed
+                  </span>
+                  <span className="px-3 py-1.5 bg-elevated border border-border-subtle rounded-md">
+                    Stays on your machine
+                  </span>
+                </div>
+
+                <p className="mt-3 text-xs text-text-muted text-center">
+                  Files are read directly in your browser. Nothing is uploaded.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Server Tab */}
+        {activeTab === 'server' && (
+          <div className="p-8 bg-surface border border-border-default rounded-3xl">
+            {/* Repo List View — shown after connecting to server */}
+            {serverRepos && !isConnecting ? (
+              <>
+                <div className="flex items-center gap-3 mb-6">
+                  <button
+                    onClick={() => { setServerRepos(null); setConnectedServerUrl(null); }}
+                    className="p-1.5 text-text-muted hover:text-text-primary hover:bg-hover rounded-lg transition-colors"
+                    title="Back"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <div>
+                    <h2 className="text-lg font-semibold text-text-primary">Select Repository</h2>
+                    <p className="text-xs text-text-muted">{serverRepos.length} repos on {connectedServerUrl}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-2 max-h-80 overflow-y-auto scrollbar-thin">
+                  {serverRepos.map((repo) => (
+                    <button
+                      key={repo.name}
+                      onClick={() => handleSelectRepo(repo.name)}
+                      className="w-full p-4 bg-elevated border border-border-subtle rounded-xl hover:border-accent/50 hover:bg-hover transition-all text-left group"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 flex items-center justify-center bg-accent/15 rounded-lg shrink-0 group-hover:bg-accent/25 transition-colors">
+                          <Database className="w-5 h-5 text-accent" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-text-primary truncate">{repo.name}</p>
+                          <p className="text-[10px] text-text-muted truncate">{repo.path}</p>
+                        </div>
+                        <ArrowRight className="w-4 h-4 text-text-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+                      </div>
+                      <div className="flex items-center gap-3 mt-2 ml-13">
+                        <span className="text-[10px] text-text-muted px-2 py-0.5 bg-surface rounded">
+                          {repo.stats.files} files
+                        </span>
+                        <span className="text-[10px] text-text-muted px-2 py-0.5 bg-surface rounded">
+                          {repo.stats.nodes} nodes
+                        </span>
+                        <span className="text-[10px] text-text-muted px-2 py-0.5 bg-surface rounded">
+                          {repo.stats.edges} edges
+                        </span>
+                        {repo.stats.communities > 0 && (
+                          <span className="text-[10px] text-text-muted px-2 py-0.5 bg-surface rounded">
+                            {repo.stats.communities} clusters
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                {/* Connection Form / Loading View */}
+                {/* Icon */}
+                <div className="mx-auto w-20 h-20 mb-6 flex items-center justify-center bg-gradient-to-br from-accent to-emerald-600 rounded-2xl shadow-lg">
+                  <Globe className="w-10 h-10 text-white" />
+                </div>
+
+                {/* Text */}
+                <h2 className="text-xl font-semibold text-text-primary text-center mb-2">
+                  {isConnecting ? 'Loading Repository' : 'Connect to Server'}
+                </h2>
+                <p className="text-sm text-text-secondary text-center mb-6">
+                  {isConnecting
+                    ? 'Downloading knowledge graph...'
+                    : 'Load a pre-built knowledge graph from a running GitNexus server'
+                  }
+                </p>
+
+                {/* Inputs — hide while loading a repo */}
+                {!isConnecting && (
+                  <div className="space-y-3" data-form-type="other">
+                    <input
+                      type="url"
+                      name="server-url-input"
+                      value={serverUrl}
+                      onChange={(e) => setServerUrl(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && !isFetchingRepos && handleServerConnect()}
+                      placeholder={window.location.origin}
+                      disabled={isFetchingRepos}
+                      autoComplete="off"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      data-form-type="other"
+                      className="
+                        w-full px-4 py-3
+                        bg-elevated border border-border-default rounded-xl
+                        text-text-primary placeholder-text-muted
+                        focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent
+                        disabled:opacity-50 disabled:cursor-not-allowed
+                        transition-all duration-200
+                      "
+                    />
+
+                    <button
+                      onClick={handleServerConnect}
+                      disabled={isFetchingRepos}
+                      className="
+                        w-full flex items-center justify-center gap-2
+                        px-4 py-3
+                        bg-accent hover:bg-accent/90
+                        text-white font-medium rounded-xl
+                        disabled:opacity-50 disabled:cursor-not-allowed
+                        transition-all duration-200
+                      "
+                    >
+                      {isFetchingRepos ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          Connecting...
+                        </>
+                      ) : (
+                        <>
+                          Connect
+                          <ArrowRight className="w-5 h-5" />
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* Loading repo progress */}
+                {isConnecting && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-center gap-2 text-text-secondary text-sm">
                       <Loader2 className="w-5 h-5 animate-spin" />
                       {serverProgress.phase === 'validating'
                         ? 'Validating...'
@@ -506,64 +792,63 @@ export const DropZone = ({ onFileSelect, onGitClone, onServerConnect }: DropZone
                             ? 'Processing...'
                             : 'Connecting...'
                       }
-                    </>
-                  ) : (
-                    <>
-                      Connect
-                      <ArrowRight className="w-5 h-5" />
-                    </>
-                  )}
-                </button>
+                    </div>
 
-                {isConnecting && (
-                  <button
-                    onClick={handleCancelConnect}
-                    className="
-                      flex items-center justify-center
-                      px-4 py-3
-                      bg-red-500/20 hover:bg-red-500/30
-                      text-red-400 font-medium rounded-xl
-                      transition-all duration-200
-                    "
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                )}
-              </div>
-            </div>
+                    {/* Progress bar */}
+                    {serverProgress.phase === 'downloading' && (
+                      <div>
+                        <div className="h-2 bg-elevated rounded-full overflow-hidden">
+                          <div
+                            className={`h-full bg-accent transition-all duration-300 ease-out ${
+                              serverProgressPercent === null ? 'animate-pulse' : ''
+                            }`}
+                            style={{
+                              width: serverProgressPercent !== null
+                                ? `${serverProgressPercent}%`
+                                : '100%',
+                            }}
+                          />
+                        </div>
+                        {serverProgress.total && (
+                          <p className="mt-1 text-xs text-text-muted text-center">
+                            {formatBytes(serverProgress.downloaded)} / {formatBytes(serverProgress.total)}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
-            {/* Progress bar */}
-            {isConnecting && serverProgress.phase === 'downloading' && (
-              <div className="mt-4">
-                <div className="h-2 bg-elevated rounded-full overflow-hidden">
-                  <div
-                    className={`h-full bg-accent transition-all duration-300 ease-out ${
-                      serverProgressPercent === null ? 'animate-pulse' : ''
-                    }`}
-                    style={{
-                      width: serverProgressPercent !== null
-                        ? `${serverProgressPercent}%`
-                        : '100%',
-                    }}
-                  />
-                </div>
-                {serverProgress.total && (
-                  <p className="mt-1 text-xs text-text-muted text-center">
-                    {formatBytes(serverProgress.downloaded)} / {formatBytes(serverProgress.total)}
-                  </p>
+                    <div className="flex justify-center gap-2">
+                      {serverRepos && (
+                        <button
+                          onClick={handleBackToRepoList}
+                          className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
+                        >
+                          Back to list
+                        </button>
+                      )}
+                      <button
+                        onClick={handleCancelConnect}
+                        className="px-4 py-2 text-sm text-red-400 hover:text-red-300 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
                 )}
-              </div>
+
+                {/* Hints — only show on initial form */}
+                {!isConnecting && (
+                  <div className="mt-4 flex items-center justify-center gap-3 text-xs text-text-muted">
+                    <span className="px-3 py-1.5 bg-elevated border border-border-subtle rounded-md">
+                      Pre-indexed
+                    </span>
+                    <span className="px-3 py-1.5 bg-elevated border border-border-subtle rounded-md">
+                      No WASM needed
+                    </span>
+                  </div>
+                )}
+              </>
             )}
-
-            {/* Hints */}
-            <div className="mt-4 flex items-center justify-center gap-3 text-xs text-text-muted">
-              <span className="px-3 py-1.5 bg-elevated border border-border-subtle rounded-md">
-                Pre-indexed
-              </span>
-              <span className="px-3 py-1.5 bg-elevated border border-border-subtle rounded-md">
-                No WASM needed
-              </span>
-            </div>
           </div>
         )}
       </div>

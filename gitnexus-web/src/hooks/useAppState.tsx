@@ -7,7 +7,7 @@ import { DEFAULT_VISIBLE_LABELS } from '../lib/constants';
 import type { IngestionWorkerApi } from '../workers/ingestion.worker';
 import type { FileEntry } from '../services/zip';
 import type { EmbeddingProgress, SemanticSearchResult } from '../core/embeddings/types';
-import type { LLMSettings, ProviderConfig, AgentStreamChunk, ChatMessage, ToolCallInfo, MessageStep } from '../core/llm/types';
+import type { LLMSettings, ProviderConfig, AgentStreamChunk, ChatMessage, ToolCallInfo, MessageStep, ReportType, SavedReport } from '../core/llm/types';
 import { loadSettings, getActiveProviderConfig, saveSettings } from '../core/llm/settings-service';
 import type { AgentMessage } from '../core/llm/agent';
 import { DEFAULT_VISIBLE_EDGES, type EdgeType } from '../lib/constants';
@@ -156,9 +156,16 @@ interface AppState {
   // LLM methods
   refreshLLMSettings: () => void;
   initializeAgent: (overrideProjectName?: string) => Promise<void>;
-  sendChatMessage: (message: string) => Promise<void>;
+  sendChatMessage: (message: string, reportMeta?: { type: ReportType; title: string }) => Promise<void>;
   stopChatResponse: () => void;
   clearChat: () => void;
+
+  // Reports
+  savedReports: SavedReport[];
+  saveReport: (messageId: string, type: ReportType, title: string) => void;
+  deleteReport: (reportId: string) => void;
+  activeReport: SavedReport | null;
+  setActiveReport: (report: SavedReport | null) => void;
 
   // Code References Panel
   codeReferences: CodeReference[];
@@ -303,6 +310,26 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
   const [codeReferences, setCodeReferences] = useState<CodeReference[]>([]);
   const [isCodePanelOpen, setCodePanelOpen] = useState(false);
   const [codeReferenceFocus, setCodeReferenceFocus] = useState<CodeReferenceFocus | null>(null);
+
+  // Reports state — persist to localStorage
+  const [savedReports, setSavedReports] = useState<SavedReport[]>(() => {
+    try {
+      const raw = localStorage.getItem('gitnexus-saved-reports');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeReport, setActiveReport] = useState<SavedReport | null>(null);
+
+  // Sync savedReports to localStorage on change
+  useEffect(() => {
+    try {
+      localStorage.setItem('gitnexus-saved-reports', JSON.stringify(savedReports));
+    } catch {
+      // localStorage full or unavailable — silently ignore
+    }
+  }, [savedReports]);
 
     const normalizePath = useCallback((p: string) => {
     return p.replace(/\\/g, '/').replace(/^\.?\//, '');
@@ -604,12 +631,15 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [projectName]);
 
-  const sendChatMessage = useCallback(async (message: string): Promise<void> => {
+  const sendChatMessage = useCallback(async (message: string, reportMeta?: { type: ReportType; title: string }): Promise<void> => {
     const api = apiRef.current;
     if (!api) {
       setAgentError('Worker not initialized');
       return;
     }
+
+    // Clear active report when sending a new message
+    setActiveReport(null);
 
     // Refresh Code panel for the new question: keep user-pinned refs, clear old AI citations
     clearAICodeReferences();
@@ -628,6 +658,7 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
       role: 'user',
       content: message,
       timestamp: Date.now(),
+      reportMeta,
     };
     setChatMessages(prev => [...prev, userMessage]);
 
@@ -682,6 +713,7 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
           steps: [...stepsForMessage],
           toolCalls: [...toolCallsForMessage],
           timestamp: existing?.timestamp ?? Date.now(),
+          reportMeta,
         };
         if (existing) {
           return prev.map(m => m.id === assistantMessageId ? newMessage : m);
@@ -972,6 +1004,26 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
     setAgentError(null);
   }, []);
 
+  const saveReport = useCallback((messageId: string, type: ReportType, title: string) => {
+    const message = chatMessages.find(m => m.id === messageId);
+    if (!message) return;
+
+    const report: SavedReport = {
+      id: crypto.randomUUID(),
+      type,
+      title,
+      content: message.content,
+      messageId,
+      createdAt: Date.now(),
+    };
+    setSavedReports(prev => [...prev, report]);
+  }, [chatMessages]);
+
+  const deleteReport = useCallback((reportId: string) => {
+    setSavedReports(prev => prev.filter(r => r.id !== reportId));
+    setActiveReport(prev => prev?.id === reportId ? null : prev);
+  }, []);
+
   // Switch to a different repo on the connected server
   const switchRepo = useCallback(async (repoName: string) => {
     if (!serverBaseUrl) return;
@@ -1178,6 +1230,12 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
     clearAICodeReferences,
     clearCodeReferences,
     codeReferenceFocus,
+    // Reports
+    savedReports,
+    saveReport,
+    deleteReport,
+    activeReport,
+    setActiveReport,
   };
 
   return (

@@ -119,10 +119,13 @@ When generating diagrams:
 - Wrap labels with spaces in quotes: A["My Label"]
 - Use simple IDs: A, B, C or auth, db, api
 - Flowchart: graph TD or graph LR (not flowchart)
+- Subgraph labels MUST use bracket syntax: subgraph ID["Label Text"] — NEVER use parentheses
 - Always test mentally: would this parse?
 
 BAD:  A[User's Data] --> B(Process & Save)
 GOOD: A["User Data"] --> B["Process and Save"]
+BAD:  subgraph Frontend (React Application)
+GOOD: subgraph Frontend["React Application"]
 `;
 export const createChatModel = (config: ProviderConfig): BaseChatModel => {
   switch (config.provider) {
